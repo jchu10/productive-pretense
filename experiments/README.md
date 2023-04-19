@@ -4,6 +4,7 @@ This folder contains code (e.g., Lookit protocol) for behavioral experiments.
 
 ## Experiment 1:
 
+< describe files when they are ready >
 This is a Lookit study for children. We have two tasks (run with independent participants): 
 
 - Choice task (2AFC): Given this pretend scenario, which of these 2 objects would you rather play with?
@@ -15,10 +16,10 @@ On the choice task, for each trial we randomly assign which scenario participant
 ${P(object1 | sceneA)} > {P(object1 | sceneB)}$
 
 On the production task, for each trial we randomly assign which scenario and which object participant sees (i.e., they get one of 4 potential combinations). We predict that participants will generate more ideas for objects that are more consistent with the scenario. Specifically, we predict 
-$ {1_A / 1_B} > {2_A / 2_B} $
+$(ideas_{1A} / ideas_{2A}) > (ideas_{1B} / ideas_{2B})$
 
-Moreover, we predict that the relative 'productivity' of an object-scenario pair will correlate with the relative object preference on the choice task. Thus, 
+Moreover, we predict that the relative 'productivity' of an object-scenario pair will correlate with the relative object preference on the choice task. Thus, this correlation != 0
 
-$$ {P(object1 | sceneA)}\over{P(object1 | sceneB)} ~ {(ideas_1_A / ideas_1_B)}\over{(ideas_2_A / ideas_2_B)} $$
-
-< describe files when they are ready >
+```math
+{{P(object1 | sceneA)}\over{P(object1 | sceneB)}} \sim {{(ideas_{1A} / ideas_{2A})}\over{(ideas_{1B} / ideas_{2B})}}
+```
