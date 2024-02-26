@@ -34,6 +34,7 @@ library(ggh4x) # nested facets
 library(ggpubr) # publication-ready plots
 library(here) # friendly directories
 library(broom.mixed) # pretty regression tables
+library(kableExtra) # print tables
 
 ## PLOT AESTHETICS
 apa_theme <- theme(
@@ -59,18 +60,24 @@ apa_theme <- theme(
 theme_set(theme_minimal(base_size = 10) +
             apa_theme)
 
+## Match 
+pal_matches = c("#374e55", "#1ABC9C")
+pal_chosen = c("#374e55", "#E69F00")
 ```
 
 First we read in data, which has been pre-processed in a different R script.
 
 ```{r}
 here::i_am('pilot_pp_feb2024_models.Rmd')
-pilotdata <- read.csv("pilot_pp_feb2024_data_cleaned copy.csv") %>%
+#pilotdata <- read.csv("pilot_pp_feb2024_data_cleaned copy.csv") %>%
+pilotdata <- read.csv("pilot_pp_feb2024_data_cleaned_addTiming.csv") %>%
   # TODO : REPLACE WITH ACTUAL CALCULATIONS USING BIRTHDAY + DATE OF TEST
   mutate(child_age_days = child__age_in_days,
          child_age_months = floor(child__age_in_days / 30),
-         child_age_years = floor(child_age_months / 12),
-         child_gender = child__gender) %>%
+         child_age_years = child_age_months / 12,
+         child_age_years_group = floor(child_age_years),
+         child_gender = child__gender,
+         timeToFirstIdea = as.integer(timeToFirstIdea)) %>%
   select(!starts_with("child__")) %>% # unselect any other identifying variables
   filter(!response_uuid %in% c("6e60e04e-e5c6-4fdf-b562-19777c2bf416",
                                "756e9d1a-1bcf-442c-8c9e-c09a4218c2f9",
@@ -78,12 +85,19 @@ pilotdata <- read.csv("pilot_pp_feb2024_data_cleaned copy.csv") %>%
                                "52d1028f-5236-40c3-86f3-f5a4f95a9521", # generate incomplete
                                "54d6378d-d0e6-4f37-a0a7-7028ac6380b2", # generate no response
                                "1268dff5-832e-4443-98b4-d5cb4e61ccb6" # 9-year-old
-                               ))
+                               )) %>%
+  select(-nideas, -time) %>%
+  rename(time=time_junyi, nideas=nideas.1) %>%
+  mutate(timeToFirstIdea = timeToFirstIdea - introAudioLength)
+  
+  
 pilotkids <- pilotdata %>% select(response_uuid, child_hashed_id, child_age_days:child_gender) %>%
   unique()
 
 # print a few random lines
-slice_sample(pilotdata, n=5)
+pilotdata %>% group_by(condition) %>% 
+  slice_sample(n=4) %>%
+  kable()
 ```
 
 ### check data
@@ -106,7 +120,7 @@ pilotdata %>% filter(condition=="generate") %>%
   count(child_hashed_id) %>% count(n)
 ```
 
-### Choose dataframes
+### Make Choose dataframes
 
 This data combines both choose and generate data, so let's split them up and clean up any repeated trials, etc.
 
@@ -143,7 +157,7 @@ df.choose.scenes <- df.choose.trials %>%
 
 ```
 
-### Stimuli dataframe
+### Make Stimuli dataframe
 
 We use this for plotting and other data wrangling stuff
 
@@ -160,7 +174,7 @@ scenes <- df.choose.trials %>%
 stimuli <- full_join(scenes, objects)
 ```
 
-### Generate dataframes
+### Make Generate dataframes
 
 Then for generate. Also compute time to first / last idea, rate of ideas.
 
@@ -175,7 +189,7 @@ getseconds <- function(time) {
   minutes= as.integer(substr(time, 1,1))
   seconds= as.integer(substr(time, 3,4))
   duration = minutes*60 + seconds
-  return(duration)
+  return(duration)    
 }
 
 ## TRIAL-LEVEL DATA
@@ -184,15 +198,18 @@ df.generate.trials <- pilotdata %>%
   filter(!is.na(transcript)) %>% # remove responses not yet transcribed
 # select only relevant columns
   select(child_hashed_id, condition, trialnumber, 
-         setID, scene, scene_binary, object_generate = images.1.id, object_match, # IVs
-         transcript, time=time_junyi, nideas=nideas.1, # DVs
+         setID, scene, scene_binary, object_generate = images.1.id, object_match,# IVs
+         transcript, time, timeToFirstIdea, nideas, # DVs
          child_age_days:child_gender) %>%
   mutate(object_is_match = object_generate == object_match) %>%
   mutate(object_is_match = factor(object_is_match, levels=c(FALSE, TRUE),
                                    labels=c("Non-Matching Object", "Match Object"))) %>%
-  mutate(timeToFirstIdea = getseconds(substr(time,1,4)),
-         timeToLastIdea = getseconds(substr(time, nchar(time) - 3, nchar(time)))) %>%
-  mutate(rateOfIdeas = nideas/(timeToLastIdea/timeToFirstIdea))
+  mutate(#timeToFirstIdea = getseconds(str_sub(time, 1, 4)),
+         timeToLastIdea = getseconds(str_sub(time, -4, -1))
+         )%>%
+  mutate(rateOfIdeas = ifelse(nideas < 1, NA, nideas/timeToLastIdea),
+         timeAvg = ifelse(nideas < 1, NA, timeToLastIdea / nideas)) %>%
+  mutate(timeToFirstIdea = ifelse(timeToFirstIdea < -15, NA, timeToFirstIdea))
 
 ## AGGREGATE PER CHILD
 df.generate.kids <- df.generate.trials %>%
@@ -202,11 +219,11 @@ df.generate.kids <- df.generate.trials %>%
 
 ```
 
-### Item-level choose and generate
+### Make Item-level choose and generate dataframes
 
 A dataframe with 32 rows (all combinations of scenes and objects). Aggregate per item: choices, and generate metrics.
 
-```{r}
+```{r df.items}
 df.choose.items <- 
   df.choose.scenes %>%
   mutate(mean_chose_obj0 = 1-mean_chose_obj1) %>%
@@ -215,19 +232,20 @@ df.choose.items <-
                values_to="chosen_proportion") %>%
   mutate(object_binary = as.integer(substr(object_binary, 15, 15))) %>% left_join(select(stimuli, -object_match))
 
-
 df.generate.items <- df.generate.trials %>%
   group_by(setID, scene, scene_binary, object_generate, object_is_match) %>%
   summarize(
     mean_nideas = mean(nideas, na.rm=T),
     mean_time1 = mean(timeToFirstIdea, na.rm=T),
-    mean_rateideas = mean(rateOfIdeas, na.rm=T)
+    mean_rateideas = mean(rateOfIdeas, na.rm=T),
+    mean_timeAvg = mean(timeAvg, na.rm=T)
   ) %>%
   left_join(rename(objects, object_generate=object))
 
 
 df.items <- df.generate.items %>%
-  left_join(df.choose.items)
+  left_join(df.choose.items) %>%
+  ungroup()
 ```
 
 ### Trial-level choose and generate
@@ -239,41 +257,43 @@ FINALLY,Make a dataframe with 16 rows per child (for each scene) containing:
 - idea measures (n ideas, time to first idea, rate of ideas)
 - was object chosen or not? match or not?
 
-```{r}
+```{r df.trials}
 df.trials <- 
   df.generate.trials %>%
-  select(child_hashed_id, setID, scene, scene_binary, 
+  select(child_hashed_id, trialnumber, setID, scene, scene_binary, 
          object_generate, object_match, object_is_match,
-         nideas, timeToFirstIdea, timeToLastIdea, rateOfIdeas) %>% 
+         nideas, timeToFirstIdea, rateOfIdeas, timeAvg, transcript) %>% 
   left_join(objects, by=c('setID', 'object_generate'='object')) %>%
   left_join(select(df.choose.trials, child_hashed_id, setID, scene, 
                    chosen_object, chosen_object_binary, chosen_side, chosen_is_match, 
                    child_age_days:child_gender)) %>%
   mutate(object_is_chosen = chosen_object==object_generate) %>%
   mutate(object_is_chosen = factor(object_is_chosen, levels=c(FALSE, TRUE),
-                                   labels=c("Preferred object", "Non-preferred object"))) %>%
+                                   labels=c("Non-preferred object", "Preferred object"))) %>%
   arrange(child_hashed_id, setID, object_binary) %>%
   # now rearrange columns, clustered by meaning
-  relocate(starts_with("chosen"), .after="rateOfIdeas") %>% # move to the end 
+  relocate(starts_with("chosen"), .after="timeAvg") %>% # move to the end 
   relocate(starts_with("object")) %>% # successively move to left
   relocate(starts_with("scene")) %>%
   relocate("setID") %>%
   relocate(starts_with("child")) # put this at the front
+```
 
-# print column names
-names(df.trials)
-# how many data points per kid? 24 kids, 15 or 16 trials each
-df.trials %>% count(child_hashed_id) %>% count(n)
+# Participants & Data availability
+
+The data comes from `r nrow(pilotkids)` children, ages `r min(pilotkids$child_age_years)` to `r max(pilotkids$child_age_years)` years (M = `r mean(pilotkids$child_age_years)` years, SD = `r SD(pilotkids$child_age_years)`). 
+
+We have choose data from `r nrow(df.choose.kids)` children (M = `r mean(df.choose.kids$child_age_years)` years), contributing a total of `r nrow(df.choose.trials)` trials.
+
+For generate data, we have responses from `r nrow(df.generate.kids)` children  (M = `r mean(df.generate.kids$child_age_years)` years), contributing a total of`r nrow(df.generate.trials)`. 
+However, we have to exclude `r sum(is.na(df.generate.trials$nideas))` of these trials due to the following reasons:
+
+```{r}
+df.generate.trials %>% filter(is.na(nideas)) %>% count(transcript)
 ```
 
 
-# Participants
-
-The data comes from `r nrow(pilotkids)` children, ages `r min(pilotkids$child_age_years)` to `r max(pilotkids$child_age_years)` years old (M = `r mean(pilotkids$child_age_years)` years, SD = `r SD(pilotkids$child_age_years)`). 
-
-We have choose data from `r nrow(df.choose.kids)` children (M age `r mean(df.choose.kids$child_age_years)`. For generate data, we have responses from `r nrow(df.generate.kids)` children  (M age `r mean(df.generate.kids$child_age_years)`. 
-
-# Choose responses
+# Choose descriptives
 
 We ran two counterbalanced lists, `scene_binary = 0 or 1`. Due to Lookit randomization + exclusions, one list has 12 participants, the other has 24 participants (25 if counting the child who only did half of all 8 trials).
 
@@ -282,7 +302,7 @@ df.choose.trials %>% count(scene_binary, setID) %>%
   count(scene_binary, n)
 ```
 
-## Overall Contingency table (scene_binary x chosen_binary)
+## Overall (scene_binary x chosen_binary)
 
 Aggregating across sets, do object choices vary by scene? (Note that this arbitrarily assigns each scene a 0/1 label) 
 
@@ -382,7 +402,7 @@ df.sets <- df.choose.trials %>%
   mutate(oddsratio = odds_o1_s1 / odds_o1_s0)
 
 # Display
-df.sets %>% select(setID, oddsratio)
+df.sets %>% select(setID, oddsratio) %>% kable()
 ```
 
 Visualize proportion choosing object 0/1
@@ -413,15 +433,27 @@ df.choose.trials %>%
 ```
 
 
-## glm
+## GLM: choice vs. scene 
 
+We have three kinds of trial-level analyses, each accounting for random effects of scene/set and childID.
 
-### choice_binary
+1. Predict `choice_binary` from `scene_binary`. This is a generalization of the chi-square, accounting for setID and childID. Each participant contributes 8 rows.
+
+2. Predict `chosen_is_match` (T/F), accounting for scene and childID. This estimates the probability that on any given trial, children will choose the matching object. Each participant contributes 8 rows.
+
+3. Predict `object_is_chosen` (T/F) from `object_is_match`, accounting for scene and childID. 
+This estimates how much more likely an object will be chosen if it is a matching object. Each participant contributes 16 rows. *We'll run this after exploring the generate data*
+
+Analysis 3 and 2, in their simplest forms, are the same. What changes is the kind of covariates we want to use. Analysis 3 -- we can use object-level characteristics, such as number of ideas for either object, or which scene was being presented. In Analysis 2, we can only include variables about that choice trial, e.g., Ratio of ideas `nideas_chosen / nideas_notchosen` or Difference between ideas `nideas_chosen - nideas_notchosen`. 
+
+### GLM 1: choice_binary ~ scene_binary
+
+QN: is chosen object & scene independent, according to pre-defined A/B labels?
 
 Predict object choice (0 or 1) based on scene (0 or 1), with random effect of Set and Child.
 
 - Model 1: `chosen_object_binary ~ scene_binary + (1|setID) + (1|childID)`
-- Model 2: `chosen_object_binary ~ scene_binary + age + (1|setID)`
+- Model 2: `chosen_object_binary ~ scene_binary + age + (1|setID) + (1|childID)`
 
 TODO: We should respect experimental design in including `(1|childID)`, however, note that in the pilot data, there is negligible variance attributed to childID.
 
@@ -451,7 +483,7 @@ anova(choice01_model2, choice01_model1)
 Report model summary in terms of exponentiated coefficients, i.e., odds ratios. 
 
 ```{r}
-tidy(choice01_model1, exponentiate=T, conf.int=T)
+kable(tidy(choice01_model1, exponentiate=T, conf.int=T))
 ```
 
 Full model summary
@@ -467,8 +499,7 @@ plot_model(choice01_model1, type="pred")
 ```
 
 
-
-### choice_match
+### GLM 2: choice_is_match ~ 1
 
 Predict whether child chose predicted object with random effect of scene and child.
 
@@ -494,10 +525,10 @@ Age is not significant.
 anova(choiceMatch_model1, choiceMatch_model2)
 ```
 
-Exponentiate estimate. exp(intercept) indicates 
+Exponentiate estimate. exp(intercept) indicates Odds of choosing match object.
 
 ```{r}
-tidy(choiceMatch_model1, exponentiate=T, conf.int=T)
+kable(tidy(choiceMatch_model1, exponentiate=T, conf.int=T))
 ```
 
 Full model summary
@@ -506,222 +537,437 @@ Full model summary
 summary(choiceMatch_model1)
 ```
 
-
-# Generate responses
+# Generate descriptives
 
 n=24 kids, 356 trials
 
 We have 3 dependent measures for each trial:
 
-- Number of ideas
-- Rate of ideas
-- Time to first idea
+- Number of ideas: [`r range(df.trials$nidea, na.rm=T)`]
+- Time to first idea (in seconds, if gave any idea) [`r range(df.trials$timeToFirstIdea, na.rm=T)`]
+- Average time per idea (in seconds, if any idea) [`r range(df.trials$timeAvg, na.rm=T)`]
+- Rate of ideas (per second, if any ideas) `r range(df.trials$rateOfIdeas, na.rm=T)`
+- 
 
-## Overall
+## Overall distributions
 
-### Number of ideas
-### Rate of ideas
-### Time to first idea
+```{r}
+df.trials %>%
+  summarise_at(vars(nideas, timeToFirstIdea, timeAvg, rateOfIdeas),
+            list(mean=~ mean(.x, na.rm = TRUE),
+                 sd= ~sd(.x, na.rm = TRUE)))
+```
+negative time 1
+```{r}
+df.trials %>% count(timeToFirstIdea < 0)
+```
+
+```{r fig.height=2.5, fig.width=4}
+plotdist <- function(data, dv, bw) {
+  DV = enquo(dv)
+  ggplot(data) + 
+  geom_vline(aes(xintercept=mean(!!DV, na.rm=T)), 
+             color="blue", size=1, linetype="dashed")+
+  geom_histogram(aes(y = bw*after_stat(density),
+  #geom_histogram(aes(y = after_stat(count / sum(count)),
+                     x = !!DV),
+                 binwidth=bw, position = position_dodge(0.3),
+                 alpha=0.5, color="grey30") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name="Frequency")
+}
+plotdist(df.trials, nideas, 1)
+plotdist(df.trials, timeToFirstIdea, 1)
+plotdist(df.trials, timeAvg, 1)
+plotdist(df.trials, rateOfIdeas, 0.01)
+```
 
 ## Whether prompted object matches scene
 
-Calculate average for match vs non-match
+Plot nideas
+
+```{r, fig.height=3, fig.width=3}
+ggpaired(df.generate.items, x='object_is_match', y='mean_nideas',
+         color='object_is_match', alpha=0.2,
+         line.color='grey80',
+         palette=pal_matches) +
+  scale_x_discrete(labels = scales::label_wrap(10)) +
+  labs(y="Avg. Number of ideas", x=NULL) +
+  theme(legend.position = "none") +
+  stat_compare_means(paired=T)
+```
+Plot time1
+
+
+```{r, fig.height=3, fig.width=3}
+ggpaired(df.generate.items, x='object_is_match', y='mean_time1',
+         color='object_is_match', alpha=0.2,
+         line.color='grey80',
+         palette=pal_matches) +
+  scale_x_discrete(labels = scales::label_wrap(10)) +
+  labs(y="Avg. time to first idea", x=NULL) +
+  theme(legend.position = "none") +
+  stat_compare_means(paired=T)
+```
+
+### by subject, match
+
+```{r}
+df.generate.bykid.match <- df.generate.trials %>%
+  group_by(child_hashed_id, object_is_match) %>%
+  summarize(
+    mean_nideas = mean(nideas, na.rm=T),
+    mean_time1 = mean(timeToFirstIdea, na.rm=T),
+    mean_rateideas = mean(rateOfIdeas, na.rm=T),
+    mean_timeAvg = mean(timeAvg, na.rm=T)
+  ) %>% ungroup()
+
+df.generate.bykid.match %>%
+  group_by(object_is_match) %>%
+  summarise_at(vars(starts_with("mean")),
+            list(mean=~ mean(.x, na.rm = TRUE),
+                 sd= ~sd(.x, na.rm = TRUE)))
+```
+
+Plot N IDEAS
+
+```{r, fig.height=3, fig.width=3}
+ggplot(df.generate.bykid.match, aes(x=object_is_match, y=mean_nideas, color=object_is_match)) +
+  geom_boxplot()+
+  geom_point(alpha=0.5, size=2) +
+  geom_line(aes(group=child_hashed_id), color="grey80") +
+  scale_x_discrete(labels = scales::label_wrap(10)) +
+  scale_color_manual(values=pal_matches) +
+  labs(y="Avg. Number of ideas", x=NULL) +
+  theme(legend.position = "none") +
+  stat_compare_means(paired=T)
+  
+# 
+# ggpaired(df.generate.bykid.match, x='object_is_match', y='mean_nideas',
+#          color='object_is_match', alpha=0.2,
+#          line.color='grey80',
+#          palette=pal_matches) +
+#   scale_x_discrete(labels = scales::label_wrap(10)) +
+#   labs(y="Avg. Number of ideas", x=NULL) +
+#   theme(legend.position = "none") +
+#   stat_compare_means(paired=T)
+```
+Plot N IDEAS
+
+```{r, fig.height=3, fig.width=3}
+
+ggplot(df.generate.bykid.match, aes(x=object_is_match, y=mean_time1, color=object_is_match)) +
+  geom_boxplot()+
+  geom_point(alpha=0.5, size=2) +
+  geom_line(aes(group=child_hashed_id), color="grey80") +
+  scale_x_discrete(labels = scales::label_wrap(10)) +
+  scale_color_manual(values=pal_matches) +
+  labs(y="Avg. Time to 1st idea", x=NULL) +
+  theme(legend.position = "none") +
+  stat_compare_means(paired=T)
+
+# ggpaired(df.generate.bykid.match, x='object_is_match', y='mean_time1',
+#          color='object_is_match', alpha=0.2,group="child_hashed_id",
+#          line.color='grey80',
+#          palette=pal_matches) +
+#   scale_x_discrete(labels = scales::label_wrap(10)) +
+#   labs(y="Avg. Time to 1st idea", x=NULL) +
+#   theme(legend.position = "none") +
+#   stat_compare_means(paired=T)
+```
+
+### by subject, chosen
+
+```{r}
+df.generate.bykid.choice <- df.trials %>%
+  group_by(child_hashed_id, object_is_chosen) %>%
+  summarize(
+    mean_nideas = mean(nideas, na.rm=T),
+    mean_time1 = mean(timeToFirstIdea, na.rm=T),
+    mean_rateideas = mean(rateOfIdeas, na.rm=T),
+    mean_timeAvg = mean(timeAvg, na.rm=T)
+  )
+
+df.generate.bykid.choice %>%
+  group_by(object_is_chosen) %>%
+  summarise_at(vars(starts_with("mean")),
+            list(mean=~ mean(.x, na.rm = TRUE),
+                 sd= ~sd(.x, na.rm = TRUE)))
+```
+
+Plot N IDEAS
+
+```{r, fig.height=3, fig.width=3}
+ggpaired(df.generate.bykid.choice, x='object_is_chosen', y='mean_nideas',
+         color='object_is_chosen', alpha=0.2, group="child_hashed_id",
+         line.color='grey80',
+         palette=pal_chosen) +
+  scale_x_discrete(labels = scales::label_wrap(10)) +
+  labs(y="Avg. Number of ideas", x=NULL) +
+  theme(legend.position = "none") +
+  stat_compare_means(paired=T)
+```
+Plot N IDEAS
+
+```{r, fig.height=3, fig.width=3}
+ggpaired(df.generate.bykid.choice, x='object_is_chosen', y='mean_time1',
+         color='object_is_chosen', alpha=0.2,group="child_hashed_id",
+         line.color='grey80',
+         palette=pal_chosen) +
+  scale_x_discrete(labels = scales::label_wrap(10)) +
+  labs(y="Avg. Time to 1st idea", x=NULL) +
+  theme(legend.position = "none") +
+  stat_compare_means(paired=T)
+```
+
+### paired t-test - BY TRIALS, IGNORE
+
+
+No difference between Means?
 
 ```{r}
 mu1 <- df.trials %>%
   group_by(object_is_match) %>%
-  summarise_at(vars(nideas, timeToFirstIdea, rateOfIdeas),
+  summarise_at(vars(nideas, timeToFirstIdea, timeAvg, rateOfIdeas),
             list(mean=~ mean(.x, na.rm = TRUE),
                  sd= ~sd(.x, na.rm = TRUE)))
+kable(mu1)
+```
+
+T-test
+
+```{r df.relative.match}
+# WIDE data frame - one row per scene; compute ratios & differences of DVs
+df.relative.match <- df.trials %>% 
+  filter(!is.na(nideas)) %>%
+  select(child_hashed_id, child_age_months, 
+                     setID, scene, object_is_match, 
+         nideas, timeToFirstIdea, timeAvg, rateOfIdeas) %>%
+  mutate(object_is_match = object_is_match=="Match Object") %>%
+  pivot_wider(names_from = object_is_match,
+              values_from = c(nideas, timeToFirstIdea, timeAvg, rateOfIdeas)) %>%
+  mutate(nideas_ratio = nideas_TRUE / nideas_FALSE,
+         time1_ratio = timeToFirstIdea_TRUE / timeToFirstIdea_FALSE,
+         timeAvg_ratio = timeAvg_TRUE / timeAvg_FALSE,
+         rate_ratio = rateOfIdeas_TRUE / rateOfIdeas_FALSE,
+         nideas_diff = nideas_TRUE - nideas_FALSE,
+         time1_diff = timeToFirstIdea_TRUE - timeToFirstIdea_FALSE,
+         timeAvg_diff = timeAvg_TRUE - timeAvg_FALSE,
+         rate_diff = rateOfIdeas_TRUE - rateOfIdeas_FALSE
+         )
+
+# t-test of within-sub difference
+mu1a <- df.relative.match %>% 
+  select(-ends_with('TRUE'), -ends_with('FALSE')) %>%
+  pivot_longer(cols = ends_with("diff")) %>%
+  filter(value!= Inf) %>%
+  group_by(name) %>% # for each measure
+  nest() %>% # nest the data
+  mutate(
+    N = map(data, nrow),
+    t_test = map(data, ~{t.test(.x$value) %>% tidy()})) %>% 
+  select(-data) %>%
+  unnest(cols = c(N, t_test))
+
+kable(mu1a)
+```
+
+T-test on ratios
+
+```{r}
+mu1b <- df.relative.match %>% 
+  select(-ends_with('TRUE'), -ends_with('FALSE')) %>%
+  pivot_longer(cols = ends_with("ratio")) %>%
+  filter(value!= Inf) %>%
+  group_by(name) %>% # for each measure
+  nest() %>% # nest the data
+  mutate(
+    N = map(data, nrow),
+    t_test = map(data, ~{t.test(.x$value, mu=1) %>% tidy()})) %>% 
+  select(-data) %>%
+  unnest(cols = c(N, t_test))
+
+kable(mu1b)
 ```
 
 ### Number of ideas
 
-```{r}
+```{r fig.height=2.5, fig.width=4}
 ggplot(df.trials, aes(x=nideas, fill = object_is_match, color=object_is_match)) + 
-  geom_vline(data=mu1, 
-             aes(xintercept=nideas_mean, color=object_is_match), 
-             size=1)+
-  geom_histogram(aes(y = after_stat(density)),
+  # geom_vline(data=mu1, 
+  #            aes(xintercept=nideas_mean, color=object_is_match), 
+  #            size=1)+
+    geom_histogram(aes(y = after_stat(density)),
+  #geom_histogram(aes(y = after_stat(count / sum(count)),
                  binwidth=1, position = position_dodge(0.3),
                  alpha=0.5, color="grey30") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + # no space below, 10% above bars 
-  scale_color_manual(values=c("grey70", "#1ABC9C"))+
-  scale_fill_manual(values=c("grey70", "#1ABC9C")) +
-  theme(legend.position = c(.9,.8))
+scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                   labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_matches)+
+  scale_fill_manual(values=pal_matches) +
+  theme(legend.position = c(.78,.8))
 ```
 
-### Rate of ideas
+Within-subjects
 
 ```{r}
-ggplot(df.trials, aes(x=rateOfIdeas, fill = object_is_match, color=object_is_match)) + 
-  geom_vline(data=mu1, 
-             aes(xintercept=rateOfIdeas_mean, color=object_is_match), 
-             size=1)+
-geom_density(aes(y = after_stat(count)),
-  alpha=0.5)+
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + # no space below, 10% above bars 
-  scale_color_manual(values=c("grey70", "#1ABC9C"))+
-  scale_fill_manual(values=c("grey70", "#1ABC9C")) +
-  theme(legend.position = c(.9,.8))
+df.trials %>%
+  filter(!is.na(nideas)) %>%
+  ggpaired(x = "object_is_match", y = "nideas",
+         color = "object_is_match", line.color = "gray", line.size = 0.4,
+         palette = pal_matches)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none')
 ```
 
 ### Time to first idea
 
-```{r}
-ggplot(df.trials, aes(x=timeToFirstIdea, fill = object_is_match, color=object_is_match)) + 
+```{r fig.width=4.5, fig.height=2.5}
+ggplot(df.trials, aes(x=timeToFirstIdea, fill = object_is_match)) + 
   geom_vline(data=mu1, 
-             aes(xintercept=timeToFirstIdea_mean, color=object_is_match), 
-             size=1)+
-geom_density(aes(y = after_stat(count)),
-  alpha=0.5)+
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + # no space below, 10% above bars 
-  scale_color_manual(values=c("grey70", "#1ABC9C"))+
-  scale_fill_manual(values=c("grey70", "#1ABC9C")) +
+             aes(xintercept=timeToFirstIdea_mean, 
+                 color=object_is_match), 
+             size=1, linetype="dashed")+
+#geom_density(aes(y = after_stat(count)),
+  geom_histogram(aes(y = .5*2*after_stat(density)), binwidth=2,
+               position = position_dodge(width=0.3*2),
+               alpha=0.5, color="grey30")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_matches)+
+  scale_fill_manual(values=pal_matches) +
+  theme(legend.position = c(.8,.8))
+```
+
+Within-subjects
+
+```{r}
+df.trials %>% count(setID, child_hashed_id, nideas > 0) %>% filter(`nideas > 0`, n ==2) %>%
+  left_join(df.trials, relationship = "many-to-many") %>%
+  ggpaired(x = "object_is_match", y = "timeToFirstIdea",
+         color = "object_is_match", 
+         line.color = "gray", line.size = 0.4,
+         palette = pal_matches)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none') +
+  labs(subtitle="Time to first idea")
+```
+
+### Rate of ideas
+
+```{r fig.width=4, fig.height=2.5}
+ggplot(df.trials, aes(x=rateOfIdeas, fill = object_is_match)) + 
+  geom_vline(data=mu1, 
+             aes(xintercept=rateOfIdeas_mean, 
+                 color=object_is_match), 
+             size=1, linetype="dashed")+
+geom_histogram(aes(y = .5*.2*after_stat(density)), 
+               binwidth=0.2,
+               position = position_dodge(width=0.3*0.2),
+               #geom_density(aes(y = after_stat(count)),
+  alpha=0.5, color="grey30")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_matches)+
+  scale_fill_manual(values=pal_matches) +
+  theme(legend.position = c(.8,.8))
+```
+
+Within-subjects
+
+```{r eval=FALSE, include=FALSE}
+df.trials %>%
+  filter(!is.na(rateOfIdeas)) %>%
+  ggpaired(x = "object_is_match", y = "rateOfIdeas",
+         color = "object_is_match", line.color = "gray", line.size = 0.4,
+         palette = pal_matches)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none') +
+  labs(subtitle="Ideas per second")
+```
+
+### Avg time per idea
+
+```{r fig.width=4, fig.height=2.5}
+ggplot(df.trials, aes(x=timeAvg, fill = object_is_match)) + 
+  geom_vline(data=mu1, 
+             aes(xintercept=timeAvg_mean, 
+                 color=object_is_match), 
+             size=1, linetype="dashed")+
+#geom_density(aes(y = after_stat(count)),
+  geom_histogram(aes(y = .5*2*after_stat(density)), binwidth=2,
+               position = position_dodge(width=0.3*2),
+               alpha=0.5, color="grey30")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_matches)+
+  scale_fill_manual(values=pal_matches) +
   theme(legend.position = c(.9,.8))
 ```
 
-## Whether prompted object is child's preferred object
+Within-subjects
 
-Calculate average for object_is_chosen vs not
+```{r fig.width=4, fig.height=2.5}
+df.trials %>% count(setID, child_hashed_id, nideas > 0) %>% filter(`nideas > 0`, n ==2) %>%
+  left_join(df.trials, relationship = "many-to-many") %>%
+  ggpaired(x = "object_is_match", y = "timeAvg",
+         color = "object_is_match", 
+         line.color = "gray", line.size = 0.4,
+         palette = pal_matches)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none') +
+  labs(subtitle="Avg time per idea")
+```
+
+### Relative ratios
+
+Given a scene, compute Match:Non-matching object
+
+1. Ratio for number of ideas 
+(`r sum(is.na(df.relative.match$nideas_ratio))` NAs, 
+`r sum(0==df.relative.match$nideas_ratio, na.rm=T)` Zeros,
+`r sum(Inf==df.relative.match$nideas_ratio, na.rm=T)` Inf)
+
+1. Relative time to first idea. Higher = faster for this object than other (`r sum(is.na(df.relative.match$time1_ratio))` NAs)
+
+2. Relative rate of ideas. Higher = faster to generate ideas in general (`r sum(is.na(df.relative.match$rate_ratio))` NAs) 
+
+```{r fig.height=2.5, fig.width=4}
+plotdist(filter(df.relative.match, nideas_ratio!=Inf),
+         nideas_ratio, 0.2)
+
+plotdist(df.relative.match, time1_ratio, 0.2)
+plotdist(df.relative.match, rate_ratio, 0.2)
+```
+
+
+## Whether prompted object was chosen by child
+
+
+
+### paired t-test
+
+TODO: we probably want to use GLMs instead, random effect of child and scene.
+
+Print means and SDs
 
 ```{r}
 mu2 <- df.trials %>%
   group_by(object_is_chosen) %>%
-  summarise_at(vars(nideas, timeToFirstIdea, rateOfIdeas),
+  summarise_at(vars(nideas, timeToFirstIdea, timeAvg, rateOfIdeas),
             list(mean=~ mean(.x, na.rm = TRUE),
-                 sd= ~sd(.x, na.rm = TRUE)))
+                 sd= ~sd(.x, na.rm = TRUE))) %>%
+  relocate(where(is.numeric), .after =where(is.character)) # alphabetically
+
+kable(mu2)
 ```
 
-### Number of ideas
-
-```{r}
-ggplot(df.trials, aes(x=nideas, fill = object_is_chosen, color=object_is_chosen)) + 
-  geom_vline(data=mu2, 
-             aes(xintercept=nideas_mean, color=object_is_chosen), 
-             size=1)+
-  geom_histogram(aes(y = after_stat(density)),
-                 binwidth=1, position = position_dodge(0.3),
-                 alpha=0.5, color="grey30") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + # no space below, 10% above bars 
-  scale_color_manual(values=c("grey70", "#E69F00"))+
-  scale_fill_manual(values=c("grey70", "#E69F00")) +
-  theme(legend.position = c(.9,.8))
-```
-
-### Rate of ideas
-
-```{r}
-ggplot(df.trials, aes(x=rateOfIdeas, fill = object_is_chosen, color=object_is_chosen)) + 
-  geom_vline(data=mu2, 
-             aes(xintercept=rateOfIdeas_mean, color=object_is_chosen), 
-             size=1)+
-  geom_density(aes(y = after_stat(count)),
-               alpha=0.5)+
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) + # no space below, 10% above bars 
-  scale_color_manual(values=c("grey70", "#E69F00"))+
-  scale_fill_manual(values=c("grey70", "#E69F00")) +
-  theme(legend.position = c(.9,.8))
-```
-
-### Time to first idea
-
-```{r}
-ggplot(df.trials, aes(x=timeToFirstIdea, fill = object_is_chosen, color=object_is_chosen)) + 
-  geom_vline(data=mu2, 
-             aes(xintercept=timeToFirstIdea_mean, color=object_is_chosen), 
-             size=1)+
-  geom_density(aes(y = after_stat(count)),
-               alpha=0.5)+
-  scale_y_continuous(name="Frequency", expand = expansion(mult = c(0, 0.1))) + # no space below, 10% above bars 
-  scale_color_manual(values=c("grey70", "#E69F00"))+
-  scale_fill_manual(values=c("grey70", "#E69F00")) +
-  theme(legend.position = c(.9,.8))
-```
-
-
-## by item
-
-Calculate average for each item by object match or not
-
-```{r}
-mu3 <- df.trials %>%
-  group_by(setID, scene, object_is_match) %>%
-  summarise_at(vars(nideas, timeToFirstIdea, rateOfIdeas),
-            list(mean=~ mean(.x, na.rm = TRUE),
-                 sd= ~sd(.x, na.rm = TRUE)))
-```
-
-### Number of ideas
-
-```{r fig.height=8, fig.width=8}
-ggplot(df.generate.trials, aes(x=nideas)) + 
-  geom_vline(data=mu3, aes(xintercept=nideas_mean, color=object_is_match), size=1)+
-  geom_histogram(aes(fill=object_is_match, x=nideas),
-                 binwidth=1, position = position_dodge(0.3),
-                 alpha=0.5, color="grey30") +
-  # geom_text(aes(label = generate_object), size=2,
-  #        position=position_fill(vjust=0.3), colour="white")+
-  facet_nested_wrap(facets=vars(setID, scene),
-                    scales="fixed", axes="all",
-                    dir="h", ncol=4) +
-  scale_x_continuous(breaks=c(0, xmax/2, xmax)) +
-    scale_y_continuous(breaks=scales::pretty_breaks(n=3),
-                       expand = expansion(mult = c(0, 0.1))) + # no space below, above bars 
-    scale_color_manual(values=c("#999999", "#1ABC9C"))+
-  scale_fill_manual(values=c("#999999", "#1ABC9C")) +
-  theme(legend.position = 'bottom')
-```
-
-### Rate of ideas
-
-```{r fig.height=8, fig.width=8}
-ggplot(df.trials, aes(x=rateOfIdeas)) + 
-  geom_vline(data=mu3, aes(xintercept=rateOfIdeas_mean, color=object_is_match), size=1)+
-  geom_density(aes(fill=object_is_match, y = after_stat(count)),
-               alpha=0.5, color="grey30") +
-  facet_nested_wrap(facets=vars(setID, scene),
-                    scales="free_y", axes="all",
-                    dir="h", ncol=4) +
-  scale_x_continuous(breaks=c(0, xmax/2, xmax)) +
-    scale_y_continuous(breaks=scales::pretty_breaks(n=3),
-                       expand = expansion(mult = c(0, 0.1))) + # no space below, above bars 
-    scale_color_manual(values=c("#999999", "#1ABC9C"))+
-  scale_fill_manual(values=c("#999999", "#1ABC9C")) +
-  theme(legend.position = 'bottom')
-```
-
-### Time to first idea
-
-```{r fig.height=8, fig.width=8}
-ggplot(df.trials, aes(x=timeToFirstIdea)) + 
-  geom_vline(data=mu3, aes(xintercept=timeToFirstIdea_mean, color=object_is_match), size=1)+
-  geom_density(aes(fill=object_is_match, y = after_stat(count)),
-               alpha=0.5, color="grey30") +
-  facet_nested_wrap(facets=vars(setID, scene),
-                    scales="free_y", axes="all",
-                    dir="h", ncol=4) +
-  scale_x_continuous(breaks=c(0, xmax/2, xmax)) +
-    scale_y_continuous(breaks=scales::pretty_breaks(n=3),
-                       expand = expansion(mult = c(0, 0.1))) + # no space below, above bars 
-    scale_color_manual(values=c("#999999", "#1ABC9C"))+
-  scale_fill_manual(values=c("#999999", "#1ABC9C")) +
-  theme(legend.position = 'bottom')
-```
-
-
-# What predicts Choice?
-
-- item-level data in `df.items` for each 32 combinations of scene + object
-- trial-level data in `df.trials` for each generation trial
-
-## Compute relative DVs
-
-1. Relative idea count. Higher = more ideas for this object than other
-
-2. Relative time to first idea. Higher = faster for this object than other
-
-Make the dfs:
+Test differences using within-sub paired t-test
 
 ```{r}
 # CHOSEN VS NOT CHOSEN
@@ -729,308 +975,755 @@ df.relative.chosen <- df.trials %>%
   filter(!is.na(nideas)) %>%
   select(child_hashed_id, child_age_months, 
                      setID, scene, object_is_chosen, 
-         nideas, timeToFirstIdea, rateOfIdeas) %>%
+         nideas, timeToFirstIdea,timeAvg, rateOfIdeas) %>%
   mutate(object_is_chosen = object_is_chosen=="Preferred object") %>%
   pivot_wider(names_from = object_is_chosen,
-              values_from = c(nideas, timeToFirstIdea, rateOfIdeas)) %>%
+              values_from = c(nideas, timeToFirstIdea, timeAvg, rateOfIdeas)) %>%
   mutate(nideas_ratio = nideas_TRUE / nideas_FALSE,
          time1_ratio = timeToFirstIdea_TRUE / timeToFirstIdea_FALSE,
-         rate_ratio = rateOfIdeas_TRUE / rateOfIdeas_FALSE)
+         timeAvg_ratio = timeAvg_TRUE /timeAvg_FALSE,
+         rate_ratio = rateOfIdeas_TRUE / rateOfIdeas_FALSE,
+         nideas_diff = nideas_TRUE - nideas_FALSE,
+         time1_diff = timeToFirstIdea_TRUE - timeToFirstIdea_FALSE,
+         timeAvg_diff = timeAvg_TRUE - timeAvg_FALSE,
+         rate_diff = rateOfIdeas_TRUE - rateOfIdeas_FALSE)
 
-# MATCH VS NON-MATCH
-df.relative.match <- df.trials %>% 
+# t-test of within-sub difference
+mu2a <- df.relative.chosen %>% 
+  select(-ends_with('TRUE'), -ends_with('FALSE')) %>%
+  #pivot_longer(cols = ends_with("diff")) %>%
+  pivot_longer(cols = ends_with("diff")) %>%
+  filter(value!= Inf) %>%
+  group_by(name) %>% # for each measure
+  nest() %>% # nest the data
+  mutate(
+    N = map(data, nrow),
+    t_test = map(data, ~{t.test(.x$value) %>% tidy()})) %>% 
+  select(-data) %>%
+  unnest(cols = c(N, t_test))
+
+kable(mu2a)
+```
+
+Test if ratios differ from 1
+
+```{r}
+
+# t-test of within-sub difference
+mu2b <- df.relative.chosen %>% 
+  select(-ends_with('TRUE'), -ends_with('FALSE')) %>%
+  pivot_longer(cols = ends_with("ratio")) %>%
+  filter(value!= Inf) %>%
+  group_by(name) %>% # for each measure
+  nest() %>% # nest the data
+  mutate(
+    N = map(data, nrow),
+    t_test = map(data, ~{t.test(.x$value, mu=1) %>% tidy()})) %>% 
+  select(-data) %>%
+  unnest(cols = c(N, t_test))
+
+kable(mu2b)
+```
+
+### Number of ideas
+
+```{r fig.width=4, fig.height=2.5}
+ggplot(df.trials, aes(x=nideas, fill = object_is_chosen, color=object_is_chosen)) + 
+  # geom_vline(data=mu2, 
+  #            aes(xintercept=nideas_mean, color=object_is_match), 
+  #            size=1)+
+    geom_histogram(aes(y = after_stat(density)),
+  #geom_histogram(aes(y = after_stat(count / sum(count)),
+                 binwidth=1, position = position_dodge(0.3),
+                 alpha=0.5, color="grey30") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_chosen)+
+  scale_fill_manual(values=pal_chosen) +
+  theme(legend.position = c(.8,.8))
+```
+
+Within-subjects
+
+```{r}
+df.trials %>%
   filter(!is.na(nideas)) %>%
-  select(child_hashed_id, child_age_months, 
-                     setID, scene, object_is_match, 
-         nideas, timeToFirstIdea, rateOfIdeas) %>%
-  mutate(object_is_match = object_is_match=="Match Object") %>%
-  pivot_wider(names_from = object_is_match,
-              values_from = c(nideas, timeToFirstIdea, rateOfIdeas)) %>%
-  mutate(nideas_ratio = nideas_TRUE / nideas_FALSE,
-         time1_ratio = timeToFirstIdea_TRUE / timeToFirstIdea_FALSE,
-         rate_ratio = rateOfIdeas_TRUE / rateOfIdeas_FALSE)
+  ggpaired(x = "object_is_chosen", y = "nideas",
+         color = "object_is_chosen", line.color = "gray", line.size = 0.4,
+         palette = pal_chosen)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none')
 ```
 
-## Match vs nonmatch
+### Time to first idea
 
-Visualize distributions
-
-```{r}
-df <- df.relative.match %>% select(-ends_with('TRUE'), -ends_with('FALSE')) %>%
-  pivot_longer(cols = ends_with("ratio"))
-mu <- df %>% 
-  filter(value!= Inf) %>%
-  group_by(name) %>%
-  nest() %>%
-  mutate(
-    N = map(data, nrow),
-    m = map(data, ~mean(.x$value, na.rm=T)),
-    t_test = map(data, ~{t.test(.x$value) %>% tidy()})) %>% 
-  select(-data) %>%
-  unnest()
-mu
+```{r fig.width=4.5, fig.height=2.5}
+ggplot(df.trials, aes(x=timeToFirstIdea, fill = object_is_chosen)) + 
+  geom_vline(data=mu2, 
+             aes(xintercept=timeToFirstIdea_mean, 
+                 color=object_is_chosen), 
+             size=1, linetype="dashed")+
+#geom_density(aes(y = after_stat(count)),
+  geom_histogram(aes(y = .5*2*after_stat(density)), binwidth=2,
+               position = position_dodge(width=0.3*2),
+               alpha=0.5, color="grey30")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_chosen)+
+  scale_fill_manual(values=pal_chosen) +
+  theme(legend.position = c(.9,.8))
 ```
 
+Within-subjects
+
 ```{r}
-ggplot(df, aes(fill = name, x=value)) +
-  geom_vline(data=mu, aes(xintercept=m), size=1, linetype="dashed")+
-  geom_density(alpha=0.5, fill="grey50")+
-  facet_wrap(.~name, scales="free") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) # no space below, 10% above bars 
+df.trials %>% count(setID, child_hashed_id, nideas > 0) %>% filter(`nideas > 0`, n ==2) %>%
+  left_join(df.trials, relationship = "many-to-many") %>%
+  ggpaired(x = "object_is_chosen", y = "timeToFirstIdea",
+         color = "object_is_chosen", 
+         line.color = "gray", line.size = 0.4,
+         palette = pal_matches)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none') +
+  labs(subtitle="Time to first idea")
 ```
 
-## Chosen vs Non-chosen
-Visualize distributions
+### Rate of ideas
 
-```{r}
-df <- df.relative.chosen %>% select(-ends_with('TRUE'), -ends_with('FALSE')) %>%
-  pivot_longer(cols = ends_with("ratio"))
-mu <- df %>% 
-  filter(value!= Inf) %>%
-  group_by(name) %>%
-  nest() %>%
-  mutate(
-    N = map(data, nrow),
-    m = map(data, ~mean(.x$value, na.rm=T)),
-    t_test = map(data, ~{t.test(.x$value) %>% tidy()})) %>% 
-  select(-data) %>%
-  unnest()
-ggplot(df, aes(fill = name, x=value)) +
-  geom_vline(data=mu, aes(xintercept=m), size=1, linetype="dashed")+
-  geom_density(alpha=0.5, fill="grey50")+
-  facet_wrap(.~name, scales="free") +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) # no space below, 10% above bars
+```{r fig.width=4, fig.height=2.5}
+ggplot(df.trials, aes(x=rateOfIdeas, fill = object_is_chosen)) + 
+  # geom_vline(data=mu2, 
+  #            aes(xintercept=rateOfIdeas_mean, 
+  #                color=object_is_chosen), 
+  #            size=1, linetype="dashed")+
+geom_histogram(aes(y = .5*.2*after_stat(density)), 
+               binwidth=0.2,
+               position = position_dodge(width=0.3*0.2),
+               #geom_density(aes(y = after_stat(count)),
+  alpha=0.5, color="grey30")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_chosen)+
+  scale_fill_manual(values=pal_chosen) +
+  theme(legend.position = c(.8,.8))
 ```
 
+Within-subjects
+
+```{r eval=FALSE, include=FALSE}
+df.trials %>%
+  filter(!is.na(rateOfIdeas)) %>%
+  ggpaired(x = "object_is_chosen", y = "rateOfIdeas",
+         color = "object_is_chosen", line.color = "gray", line.size = 0.4,
+         palette = pal_chosen)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none') +
+  labs(subtitle="Ideas per second")
+```
+
+### Avg time per idea
+
+```{r fig.width=4, fig.height=2.5}
+ggplot(df.trials, aes(x=timeAvg, fill = object_is_chosen)) + 
+  geom_vline(data=mu2, 
+             aes(xintercept=timeAvg_mean, 
+                 color=object_is_chosen), 
+             size=1, linetype="dashed")+
+#geom_density(aes(y = after_stat(count)),
+  geom_histogram(aes(y = .5*2*after_stat(density)), binwidth=2,
+               position = position_dodge(width=0.3*2),
+               alpha=0.5, color="grey30")+
+  scale_y_continuous(expand = expansion(mult = c(0, 0.2)),
+                     labels = scales::percent_format(),
+                     name='Frequency') + # no space below, 10% above bars 
+  scale_color_manual(values=pal_chosen)+
+  scale_fill_manual(values=pal_chosen) +
+  theme(legend.position = c(.9,.8))
+```
+
+Within-subjects
+
 ```{r}
-mu
+df.trials %>% count(setID, child_hashed_id, nideas > 0) %>% filter(`nideas > 0`, n ==2) %>%
+  left_join(df.trials, relationship = "many-to-many") %>%
+  ggpaired(x = "object_is_chosen", y = "timeAvg",
+         color = "object_is_chosen", 
+         line.color = "gray", line.size = 0.4,
+         palette = pal_chosen)+
+  stat_compare_means(paired = TRUE, method="t.test") +
+  theme(legend.position = 'none') +
+  labs(subtitle="Avg time per idea")
+```
+
+### Relative ratios
+
+Given a scene, compute Match:Non-matching object
+
+1. Ratio for number of ideas 
+(`r sum(is.na(df.relative.match$nideas_ratio))` NAs, 
+`r sum(0==df.relative.match$nideas_ratio, na.rm=T)` Zeros,
+`r sum(Inf==df.relative.match$nideas_ratio, na.rm=T)` Inf)
+
+2. Relative time to first idea. Higher = faster for this object than other (`r sum(is.na(df.relative.match$time1_ratio))` NAs)
+
+3. Relative avg time per idea. Higher = denser for this object.
+
+4. Relative rate of ideas. Higher = faster to generate additional ideas past idea 1 (`r sum(is.na(df.relative.match$rate_ratio))` NAs) 
+
+```{r fig.height=2.5, fig.width=4}
+plotdist(filter(df.relative.chosen, nideas_ratio!=Inf),
+         nideas_ratio, 0.2)
+
+plotdist(df.relative.chosen, time1_ratio, 0.2)
+plotdist(df.relative.chosen, timeAvg_ratio, 0.2)
+
+plotdist(df.relative.chosen, rate_ratio, 0.2)
 ```
 
 
-## Pairwise Correlations
+# Visualize responses by item 
 
+For each item (scene-object pair), let's visualize the distributions of various outcome measures. 
 
-### how many ideas
+First let's write a function that will generate the same kind of boxplot figure.
 
-### time to idea 1
-
-### relative idea count
-
-### relative idea speed
-
-# Models
-
-Add generate DVs to regression df
-
-```{r}
-df.choose.trials_regression <- left_join()
+```{r makeboxplots}
+makeboxplots <- function(data, dv, groupvar, palette, xv=scene) {
+  XV = enquo(xv)
+  DV = enquo(dv)
+  GROUP = enquo(groupvar)
+  ggplot(data, aes(x = !!XV, y = !!DV, color = !!GROUP, fill = !!GROUP)) +
+  geom_boxplot(position = position_dodge(width=0.8), alpha=0.2) +
+  geom_point(alpha=0.5,
+             position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0,
+                                             dodge.width=0.8)) +
+  scale_color_manual(values=palette)+
+  scale_fill_manual(values=palette)+
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust=0.5),
+        legend.position = "none") +
+  guides(colour = guide_legend(nrow = 1))
+}
 ```
 
-```{r}
-glmer(chosen_object_binary.x ~ scene_binary + timeToFirstIdea + (1|setID), 
-      data = df.trials, family = "binomial")
+## Match / Non-Match
 
-summary(mixed_model4)
+### Number of ideas
+
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+makeboxplots(., nideas, object_is_match, pal_matches)
 ```
 
-# ----
+### Time to first idea
 
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+makeboxplots(., timeToFirstIdea, object_is_match, pal_matches)
+```
 
-## Models
+### Average time per idea
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+  makeboxplots(., timeAvg, object_is_match, pal_matches)
+```
 
+### Rate of ideas
 
-# original
+Inversely, number of ideas per second
 
-## Do children generate more ideas for objects they themselves preferred?
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+  makeboxplots(.,rateOfIdeas, object_is_match, pal_matches)
+```
 
+## Chosen/Non-chosen object
 
-## MODELS Part 1
+### Number of ideas
 
+```{r fig.height=5, fig.width=10}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+makeboxplots(., nideas, object_is_chosen, pal_chosen)
+```
 
+### Time to first idea
 
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+makeboxplots(., timeToFirstIdea, object_is_chosen, pal_chosen)
+```
 
-```{r}
-#creating df_choose, THEN adding on nideas/generate data
-df_choose_joinedGenerate <- df_choose %>% 
-  left_join(df_generate, by = c("child_hashed_id", "setID", "scene", "chosen_object" = "images.1.id"))
+### Average time per idea
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+  makeboxplots(., timeAvg, object_is_chosen, pal_chosen)
+```
 
+### Rate of ideas
+
+Inversely, number of ideas per second
+
+```{r fig.height=5, fig.width=11}
+df.trials %>% 
+  mutate(scene = fct_reorder(scene, setID)) %>%
+  makeboxplots(., rateOfIdeas, object_is_chosen, pal_chosen)
+```
+
+## Age effects?
+
+Continuous, months
+
+### Older kids say more ideas
+
+```{r fig.height=4, fig.width=4}
+ggscatter(df.trials, 
+          x = "child_age_months", y = "nideas",
+          add = "reg.line", conf.int = TRUE,cor.coef = TRUE,
+          size=2, alpha=0.3) +
+  scale_x_continuous(breaks=c(60, 72, 84, 96),
+                     labels=c(5, 6, 7, 8),
+                     name="Age (years)")
+```
+
+time to first ideas
+
+```{r fig.height=4, fig.width=4}
+ggscatter(df.trials, 
+          x = "child_age_months", y = "timeToFirstIdea",
+          add = "reg.line", conf.int = TRUE,cor.coef = TRUE,
+          size=2, alpha=0.3) +
+  scale_x_continuous(breaks=c(60, 72, 84, 96),
+                     labels=c(5, 6, 7, 8),
+                     name="Age (years)")
+## By match / non-math
+
+# ggscatter(df.trials, 
+#           x = "child_age_months", y = "timeToFirstIdea",
+#           add = "reg.line",conf.int = TRUE,cor.coef = TRUE,
+#           color = "object_is_match", size = 3, alpha = 0.6,
+#  palette = pal_matches
+# )
+
+## By chosen / non-chosen
+
+# ggscatter(df.trials, 
+#           x = "child_age_months", y = "timeToFirstIdea",
+#           add = "reg.line", conf.int = TRUE,cor.coef = TRUE,
+#           color = "object_is_chosen", size = 3, alpha = 0.6,
+#  palette = pal_chosen
+# )
+```
+
+rate of ideas (number of ideas per second)
+
+```{r fig.height=4, fig.width=4}
+ggscatter(df.trials, 
+          x = "child_age_months", y = "rateOfIdeas",
+          add = "reg.line", conf.int = TRUE,cor.coef = TRUE,
+          size=2, alpha=0.3) +
+  scale_x_continuous(breaks=c(60, 72, 84, 96),
+                     labels=c(5, 6, 7, 8),
+                     name="Age (years)")
 ```
 
 
+### Age X chosen/non-chosen
 
-#df_choose, adding on nideas/generate data
+Older children generate more ideas for both chosen & non-chosen objects
+
 ```{r}
-
-df_choose_joinedGenerate <- df_choose %>% 
-  left_join(df_generate, by = c("child_hashed_id", "setID", "scene", "chosen_object" = "images.1.id"))
-
+ggscatter(df.trials, 
+          x = "child_age_months", y = "nideas",
+          color = "object_is_chosen",
+          add = "reg.line", conf.int = TRUE,
+          size=3, alpha=0.4) +
+  stat_cor(aes(color = object_is_chosen), label.x = 60) +
+  scale_color_manual(values = pal_chosen) +
+  scale_fill_manual(values = pal_chosen)
 ```
 
-## MODELS Part 2
-#Mixed Effects Model 3: how many unique ideas predict ob. choice
-```{r}
-#no sig
 
-# mixed_model3 <- glmer(chosen_object_binary.x ~ scene_binary + nideas + (1|setID), data = df_choose_joinedGenerate, family = "binomial")
-# summary(mixed_model3)
-
+```{r fig.height=4.5, fig.width=6}
+df.trials %>%
+  filter(!is.na(nideas)) %>%
+  ggpaired(x = "object_is_match", y = "nideas",
+         color = "object_is_match", line.color = "gray", line.size = 0.4,
+         palette = pal_matches, facet.by = "child_age_years")+
+  stat_compare_means(paired = TRUE, method="t.test") +
+    theme(axis.text.x = element_text(angle = 90, hjust=1, vjust=0.5))
+  
 ```
 
-#Mixed Effects Model 4: how time to first idea predicts choice
-```{r}
-#no sig
-mixed_model4 <- glmer(chosen_object_binary.x ~ scene_binary + timeToFirstIdea + (1|setID), data = df_choose_joinedGenerate, family = "binomial")
+## Fatigue / Order effects?
 
-summary(mixed_model4)
+Number of ideas
+
+```{r fig.height=4, fig.width=12}
+ggplot(df.generate.trials, aes(x = trialnumber, y = nideas,
+                               color=trialnumber)) +
+  geom_violin(aes(group=trialnumber)) + 
+  geom_smooth(method="lm", color="orange")+
+  geom_point(alpha=0.5,
+             position = position_jitter(width = 0.3, height = 0)) +
+  scale_x_continuous(limits = c(1,16.5), breaks=c(1,4,8,12,16)) +
+  theme(axis.text.x = element_text(angle = 90, hjust=1, vjust=0.5),
+        legend.position = 'none') +
+  guides(colour = guide_legend(nrow = 1))
 ```
 
-#CLEANING DATA: Relative # of ideas
-```{r}
-# df_choose_joinedGenerate_relativeIdeas <- pivot_wider(df_choose_joinedGenerate,
-#   names_from = setID,
-#   values_from = nideas)
-# 
-# print(df_choose_joinedGenerate_relativeIdeas)
 
-df_generate_wider <- pivot_wider(
-  df_generate, 
-  names_from = images.1.id,
-  values_from = nideas 
+```{r fig.height=5, fig.width=5}
+ggscatter(df.generate.trials, 
+          x = "trialnumber", y = "timeToFirstIdea",
+          add = "reg.line",conf.int = TRUE,cor.coef = TRUE,
+          color = "object_is_match", size = 3, alpha = 0.6,
+ palette = pal_matches
 )
 
-columns_to_remove_ <- c("response_uuid", "response_side", "images.1.id",                 "images.2.id", "participant__global_id", "participant__hashed_id", "participant__nickname", "child__global_id", "child__name", "child__condition_list",  "child__additional_information")
-
-df_generate_wider[, columns_to_remove_] <- NULL
-
-#replace NAs with 0
-
-# df_generate_wider <- df_generate_wider %>%
-#   mutate(icescoop = ifelse(is.na(icescoop), 0, icescoop)) %>% 
-#   mutate(keys = ifelse(is.na(keys), 0, keys))  %>% 
-#   mutate(broom = ifelse(is.na(broom), 0, broom)) %>% 
-#   mutate(socks = ifelse(is.na(socks), 0, socks)) %>% 
-#   mutate(keys = ifelse(is.na(keys), 0, keys))  %>% 
-#   mutate(broom = ifelse(is.na(broom), 0, broom)) %>%
-
-cols_to_replace <- c("icescoop", "helmet","papertoweltube",       "vacuumtube", "socks","hairbrush","hanger", "sponge", "yellowball","blanket","featherduster","keys","pokerchips", "broom","stringlights","frisbee")
-
-df_generate_wider <- df_generate_wider %>%
-  mutate(across(cols_to_replace, ~ifelse(is.na(.), 0, .)))
-
-#try creating a whole new dataframe that only pulls IDs, scenes
-result <- aggregate(cbind(icescoop, keys) ~ child_hashed_id + scene, data = df_generate_wider, FUN = sum)
-
-
-result_set1 <- df_generate_wider %>% 
-  filter(setID == "set1") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(papertoweltube),
-    object2_nIdeas = sum(frisbee)
-  )
-
-result_set2 <- df_generate_wider %>% 
-  filter(scene == "astronauts" | scene == "campers") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(helmet),
-    object2_nIdeas = sum(blanket)
-  )
-
-result_set3 <- df_generate_wider %>% 
-  filter(setID == "set3") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(hairbrush),
-    object2_nIdeas = sum(stringlights)
-  )
-
-result_set4 <- df_generate_wider %>% 
-  filter(scene == "doctors" | scene == "musicians") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary,  child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(socks),
-    object2_nIdeas = sum(broom)
-  )
-
-result_set5 <- df_generate_wider %>% 
-  filter(setID == "set5") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(icescoop),
-    object2_nIdeas = sum(keys)
-  )
-
-result_set6 <- df_generate_wider %>% 
-  filter(setID == "set6") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(pokerchips),
-    object2_nIdeas = sum(vacuumtube)
-  )
-
-result_set7 <- df_generate_wider %>% 
-  filter(setID == "set7") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(featherduster),
-    object2_nIdeas = sum(sponge)
-  )
-
-result_set8 <- df_generate_wider %>% 
-  filter(setID == "set8") %>%
-  group_by(child_hashed_id, scene, chosen_object, chosen_object_binary, scene_binary, child__age_in_days, setID) %>%
-  summarize(
-    object1_nIdeas = sum(hanger),
-    object2_nIdeas = sum(yellowball)
-  )
-
-df_generate_wider2 <- bind_rows(result_set1, result_set2, result_set3, result_set4, result_set5, result_set6, result_set7,result_set8)
-
-df_generate_wider2 <- df_generate_wider2 %>% 
-  mutate(relativeNumofIdeas = case_when (
-    object1_nIdeas >= object2_nIdeas & object2_nIdeas != 0 ~ as.numeric(object1_nIdeas/object2_nIdeas),
-    object1_nIdeas < object2_nIdeas & object1_nIdeas != 0~ as.numeric(object2_nIdeas/object1_nIdeas),
-    
-    #HOW DO WE TREAT 0 VALUES. 
-    object1_nIdeas >= object2_nIdeas & object2_nIdeas == 0 ~ as.numeric(object1_nIdeas/.001),
-    object1_nIdeas < object2_nIdeas & object1_nIdeas == 0 ~ as.numeric(object2_nIdeas/.001),
-  ))
+# ggplot(df.generate.trials, aes(x = trialnumber, y = timeToFirstIdea,
+#                                color=trialnumber)) +
+#   geom_violin(aes(group=trialnumber)) + 
+#   geom_smooth(method="lm", color="orange")+
+#   geom_point(alpha=0.5,
+#              position = position_jitter(width = 0.3, height = 0)) +
+#   scale_x_continuous(limits = c(1,16.5), breaks=c(1,4,8,12,16)) +
+#   theme(axis.text.x = element_text(angle = 90, hjust=1, vjust=0.5),
+#         legend.position = 'none') +
+#   guides(colour = guide_legend(nrow = 1))
 ```
 
-# Mixed Effects Model 5: 
-```{r}
-#need to fix NA values and INF values
-#NS
-#(HYP: preferred object ~ more ideas than other object)
-mixedmodel5 <- glmer(chosen_object_binary ~ scene_binary + relativeNumofIdeas + (1|setID), data = df_generate_wider2, family = "binomial")
-summary(mixed_model5)
 
+## Pairwise Correlations between measures
+
+Each point represents a scene-object pair. For each scene, we compute `chosen_proportion` (how often that object was chosen for this scene) and correlate it against each generate DV, see **bottom row of scatter plots**. 
+
+```{r fig.height=8, fig.width=9}
+library(GGally)
+ggpairs(
+  select(df.items, 
+         mean_nideas, mean_time1, mean_rateideas, mean_timeAvg, 
+         chosen_proportion),
+  lower = list(continuous = wrap("smooth", alpha = 0.3))) +
+  theme_bw()
 ```
 
-# Mixed Effects Model 6: 
-```{r}
-#(HYP: preferred object ~ greater density of ideas)
-#NS
 
-mixedmodel6 <- glmer(chosen_object_binary.x ~ scene_binary + rateOfIdeas + (1|setID), data = df_choose_joinedGenerate, family = "binomial")
+Print correlation tables (skipped, shown in plot)
 
-summary(mixedmodel6)
-```
+```{r eval=FALSE, include=FALSE}
+correlation_matrix1 <- df.items %>%
+  select(chosen_proportion, starts_with('mean_'))
 
-# Correlations to play around with
-```{r}
-df_choose_joinedGenerate$trialnumber <- NULL
-correlation_matrix1 <- select_if(df_choose_joinedGenerate, is.numeric)
 correlation_test_result <- corr.test(correlation_matrix1)
 print(correlation_test_result)
 
-#check out age vs. rate?
-cor(df_choose_joinedGenerate$child__age_in_days, df_choose_joinedGenerate$rateOfIdeas, use = "complete.obs")
+```
+
+# GLM 3: object_is_chosen ~ ???
+
+This is the 3rd kind of analysis as noted previously.
+
+## visualizations - paired t-test
+
+N Ideas , Match / Non-match
+
+```{r fig.height=4, fig.width=4}
+ggplot(df.trials, aes(x = object_is_match, y = nideas, 
+                      color = object_is_match, fill = object_is_match)) +
+  geom_violin(alpha=0.2) +
+  geom_point(alpha=0.5,
+             position = position_jitterdodge(jitter.width = 1, jitter.height = 0.2,
+                                             dodge.width=0.8)) +
+  scale_color_manual(values=pal_matches)+
+  scale_fill_manual(values=pal_matches)+
+  theme(axis.title.x=element_blank(),
+        legend.position = "none") +
+  stat_compare_means()
+```
+
+N Ideas, Chosen / Not
+
+```{r fig.height=4, fig.width=4}
+ggplot(df.trials, aes(x = object_is_chosen, y = nideas, 
+                      color = object_is_chosen, fill = object_is_chosen)) +
+  geom_violin(alpha=0.2) +
+  geom_point(alpha=0.5,
+             position = position_jitterdodge(jitter.width = 1, jitter.height = 0.2,
+                                             dodge.width=0.8)) +
+  scale_color_manual(values=pal_chosen)+
+  scale_fill_manual(values=pal_chosen)+
+  theme(axis.title.x=element_blank(),
+        legend.position = "none") +
+  stat_compare_means(label.x = 1.5)
+```
+
+Time 1, 
+Match / Non-match
+
+```{r fig.height=4, fig.width=4}
+ggplot(df.trials, aes(x = object_is_match, y = timeToFirstIdea, 
+                      color = object_is_match, fill = object_is_match)) +
+  geom_violin(alpha=0.2) +
+  geom_point(alpha=0.5,
+             position = position_jitterdodge(jitter.width = 1, jitter.height = 0.2,
+                                             dodge.width=0.8)) +
+  scale_color_manual(values=pal_matches)+
+  scale_fill_manual(values=pal_matches)+
+  theme(axis.title.x=element_blank(),
+        legend.position = "none") +
+  stat_compare_means()
+```
+
+Chosen / Not
+
+```{r fig.height=4, fig.width=4}
+ggplot(df.trials, aes(x = object_is_chosen, y = timeToFirstIdea, 
+                      color = object_is_chosen, fill = object_is_chosen)) +
+  geom_violin(alpha=0.2) +
+  geom_point(alpha=0.5,
+             position = position_jitterdodge(jitter.width = 1, jitter.height = 0.2,
+                                             dodge.width=0.8)) +
+  scale_color_manual(values=pal_chosen)+
+  scale_fill_manual(values=pal_chosen)+
+  theme(axis.title.x=element_blank(),
+        legend.position = "none") +
+  stat_compare_means(label.x = 1.5)
+```
+## trial-level data
+
+### Match / non-match sig.
+
+Children are more likely to choose objects that match the given scene, controlling for age, and random effects of childID and object_label.
+
+`object_is_chosen ~ 1 + object_is_match + child_age_years + (1 | object_generate) + (1 | child_hashed_id)`
+
+```{r}
+m.match <- glmer(object_is_chosen ~ 1 + object_is_match + child_age_years + (1 | object_generate) + (1 | child_hashed_id),
+                      data = df.trials, 
+                      family = binomial)
+summary(m.match)
+```
+
+Report standardized regression coefficients (odds ratios)
+
+```{r}
+kable(tidy(m.match, exponentiate=T, conf.int=T))
+```
+
+
+### NIDEAS n.s.
+
+`object_is_chosen ~ 1 + nideas + (1 | object_generate) + (1 | child_hashed_id)`
+
+No effect, even without controlling for age.
+
+```{r}
+m.nidea <- glmer(object_is_chosen ~ 1 + nideas + (1 | object_generate) + (1 | child_hashed_id),
+                      data = df.trials, 
+                      family = binomial)
+summary(m.nidea)
+```
+
+### Time1 n.s.
+
+`object_is_chosen ~ 1 + timeToFirstIdea + (1 | object_generate) + (1 | child_hashed_id)`
+
+```{r}
+m.time1 <- glmer(object_is_chosen ~ 1 + timeToFirstIdea + (1 | object_generate) + (1 | child_hashed_id),
+                      data = df.trials, 
+                      family = binomial)
+summary(m.time1)
+```
+
+### Rate n.s.
+
+`chosen_is_match ~ 1 + rateOfIdeas + (1 | object_generate) + (1 | child_hashed_id)`
+
+```{r}
+m.rate <- glmer(object_is_chosen ~ 1 + rateOfIdeas + (1 | object_generate) + (1 | child_hashed_id),
+                      data = df.trials, 
+                      family = binomial)
+summary(m.rate)
+```
+
+
+### Ratio DVs
+
+First prepare a different data frame -- per trial, add relative DVs
+
+```{r}
+df.glm <- df.trials %>%
+  left_join(df.relative.chosen) %>%
+  left_join(select(df.trials, child_hashed_id, setID, scene,
+                   object_generate, object_is_match, object_is_chosen))# %>%
+  #mutate(object_is_chosen = ifelse(object_is_chosen=="Preferred object", 1, 0))
+```
+
+nideas ratio n.s.
+
+`object_is_chosen ~ 1 + nideas_ratio + (1 | object_generate) + (1 | child_hashed_id)`
+
+```{r eval=FALSE, include=FALSE}
+m.nideasRatio <- glmer(object_is_chosen ~ nideas_ratio + 
+                       (1 | child_hashed_id),
+                      data = filter(df.glm, !is.infinite(nideas_ratio)), 
+                      family = binomial)
+m.nideasRatio
+```
+
+Time 1 ratio n.s.
+
+`object_is_chosen ~ 1 + time1_ratio + (1 | object_generate) + (1 | child_hashed_id)`
+
+```{r}
+m.time1Ratio <- glmer(object_is_chosen ~ 1 + time1_ratio + 
+                       (1 | object_generate) + (1 | child_hashed_id),
+                      data = df.glm, 
+                      family = binomial)
+summary(m.time1Ratio)
+```
+
+# GLM4: Item-level proportion chosen ***
+
+## Match sig.
+
+Whether object is a match?
+
+`chosen_proportion ~ object_is_match + (1|scene)`
+
+```{r}
+mitem.match <- lmer(chosen_proportion ~ object_is_match + (1|scene),
+                      data=df.items)
+anova(mitem.match) # Match significant!!
+tidy(mitem.match) %>% kable()
+```
+
+## Avg nideas, n.s.
+
+Scatter plot
+
+```{r fig.height=4, fig.width=4}
+ggplot(df.items, aes(x=mean_nideas, y=chosen_proportion)) +
+  geom_smooth(method="lm")+
+  geom_point(size=3, alpha=0.5) +
+  stat_cor(label.x=1.9, label.y=0.22) +
+    labs(x="Avg. n_ideas", y="Proportion chosen")
+```
+
+`chosen_proportion ~ mean_nideas + (1|scene)`
+
+How many ideas were produced? n.s.
+
+```{r}
+mitem.nidea <- lmer(chosen_proportion ~ mean_nideas + (1|scene),
+                      data=df.items)
+anova(mitem.nidea)
+```
+
+Color by matching object
+
+```{r fig.height=4, fig.width=4.5}
+ggplot(df.items, aes(x=mean_nideas, y=chosen_proportion, 
+                     color=object_is_match, fill=object_is_match)) +
+  geom_smooth(method="lm", alpha=0.2)+
+  geom_point(size=3, alpha=0.5) +
+  stat_cor(label.x=1.9, label.y=c(0.3, 0.4)) +
+  scale_y_continuous(labels=scales::percent_format())+
+  scale_color_manual(values=pal_matches) +
+  scale_fill_manual(values=pal_matches) +
+  theme(legend.position = "none") +
+  labs(x="Avg. n_ideas", y="Proportion chosen")
+```
+
+## Match sig., controlling for n_ideas
+
+`chosen_proportion ~ object_is_match + mean_nideas  +(1|scene)`
+
+```{r}
+mitem.match.idea <- lmer(chosen_proportion ~ object_is_match + mean_nideas +(1|scene),
+                      data=df.items)
+tidy(mitem.match.idea) %>% kable()
+```
+
+## Time to first idea, sig.
+
+Scatter plot
+
+```{r fig.height=4, fig.width=4}
+ggplot(df.items, aes(x=mean_time1, y=chosen_proportion)) +
+  geom_smooth(method="lm")+
+  geom_point(size=3, alpha=0.5) +
+  stat_cor(label.x=15) +
+    labs(x="Avg. Time to first idea (seconds)", y="Proportion chosen")
+```
+
+`chosen_proportion ~ mean_time1 + (1|scene)`
+
+```{r}
+mitem.time1 <- lmer(chosen_proportion ~ mean_time1 + (1|scene),
+                      data=df.items)
+tidy(mitem.time1) %>% kable()
+```
+
+
+Color by matching object
+
+```{r fig.height=4, fig.width=4.5}
+ggplot(df.items, aes(x=mean_time1, y=chosen_proportion, 
+                     color=object_is_match, fill=object_is_match)) +
+  geom_smooth(method="lm", alpha=0.2)+
+  geom_point(size=3, alpha=0.5) +
+  stat_cor(label.x=16, label.y=c(0.85, 0.95)) +
+  scale_y_continuous(labels=scales::percent_format())+
+  scale_color_manual(values=pal_matches) +
+  scale_fill_manual(values=pal_matches) +
+  theme(legend.position = "none") +
+  labs(x="Avg. Time to first idea (seconds)", y="Proportion chosen")
+```
+
+Time1 + match or not: Time1 sig, Match sig.
+
+`chosen_proportion ~ mean_time1 + object_is_match + (1|scene)`
+
+```{r}
+mitem.match.time1 <- lmer(chosen_proportion ~ mean_time1 + object_is_match + (1|scene),
+                      data=df.items)
+tidy(mitem.match.time1) %>% kable()
 
 ```
 
-## General Thoughts
-# is it possible that children aren't generating that many ideas in our pilot? There are certainly some kids who are v quiet.
-# how do we get a measure of vocab fluency via the warm-up?
+
+Rate of ideas? significant `chosen_proportion ~ mean_rate + (1|scene)`
+
+```{r}
+mitem.rate <- lmer(chosen_proportion ~ mean_rateideas + (1|scene),
+                      data=df.items)
+tidy(mitem.rate)
+```
+
+Match controlling for rate of ideas? Yes. Avg rate not predictive.
+
+```{r}
+mitem.match.rate <- lmer(chosen_proportion ~ object_is_match + mean_rateideas + (1|scene),
+                      data=df.items)
+tidy(mitem.match.rate)
+
+```
+
+# TODO - IDEA QUALITY ANALYSES
+
+Let's just look at the data :
+
+```{r}
+df.trials %>% select(child_hashed_id, trialnumber, setID, scene, object_generate, object_is_match, object_is_chosen, chosen_is_match, transcript, nideas, timeToFirstIdea) %>% arrange(child_hashed_id, setID, scene, object_generate, object_is_match, object_is_chosen, chosen_is_match) %>% view()
+```
 

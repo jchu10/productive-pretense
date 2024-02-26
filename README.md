@@ -13,5 +13,8 @@ Study plans:
 - `experiments`: Code for experiment (e.g., Lookit protocols, Qualtrics .qsf)
 - `stimuli`: Image, audio, or video files that serve as inputs to our experimental code.
 - `analysis`: Code for analysis (e.g., R/Rmd notebooks)
-- `data`: Data files that serve as input to analysis. If we have identifiable data or video, those locations will be specified in the readme.
+- `data_anonymized`: Data files that serve as input to analysis. 
 - `results`: output of analysis code, e.g., figures, tidied data frames.
+
+Private folders:
+- `data_raw`: Data files that may contain identifiable information. These are not shared.
