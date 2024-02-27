@@ -1,0 +1,5 @@
+# Ignore all data files in this directory
+*_data.csv
+*_frames.csv
+*.mp4
+*.json

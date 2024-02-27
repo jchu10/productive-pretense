@@ -1,3 +1,8 @@
+# Experimental data 
+data_raw/*/*.csv
+data_raw/*/*.json
+data_raw/*/*.mp4
+
 # History files
 .Rhistory
 .Rapp.history

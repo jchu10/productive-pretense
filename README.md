@@ -1,12 +1,10 @@
 # productive-pretense
 
-Study on what people prefer to play pretend with
+Study on what children prefer to play pretend with
 
 Project log is on Google Docs: [michelle junyi study](https://docs.google.com/document/d/1ub5VmtEppOtg0N6cwpTX78WhH27qGXKiiRklwxpYYe0/edit?usp=sharing)
 
-Study plans:
-
-- list preregistrations here
+Study plans: [link to prereg]
 
 ## Folder organization
 
